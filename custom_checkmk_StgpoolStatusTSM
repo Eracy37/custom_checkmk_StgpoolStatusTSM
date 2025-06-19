@@ -1,0 +1,78 @@
+#!/usr/bin/bash
+
+#===============================================================================
+# Script Name   : custom_checkmk_StgpoolStatusTSM
+# Author        : GUERRY Cynthia (Eracy37)
+# Version       : 1.0.0
+# Last Modifed  : 04/06/2025
+# Description   : Script TSM for check usage stockage pool - checkmk - compatibility AIX
+#===============================================================================
+
+# Configuration is needed for username and password for dsmadmc
+# You need to create a configuration file /etc/check_mk/tsm.cfg
+# with the following two lines:
+# TSM_USER=XXX
+# TSM_PASSWORD=XXX
+# If you have more than once instance, make sure that the upper
+# login works on all of them.
+
+# Configuration
+CONFIG_FILE="/etc/check_mk/tsm.cfg"
+CRITICAL_THRESHOLD=95
+WARNING_THRESHOLD=90
+
+# Load configuration
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Configuration file $CONFIG_FILE not found" >&2
+    exit 1
+fi
+
+. "$CONFIG_FILE" || exit 1
+if [ -z "${TSM_USER}" ] || [ -z "${TSM_PASSWORD}" ]; then
+   echo "Please set TSM_USER and TSM_PASSWORD in $CONFIG_FILE" >&2
+   exit 1
+fi
+
+dsmcmd="dsmadmc -id=$TSM_USER -password=$TSM_PASSWORD -dataonly=yes -tab"
+
+# Get server name
+QUERY_SERVER=$($dsmcmd <<EOF
+select SERVER_NAME from STATUS
+EOF
+)
+
+# Get storage pool information
+output=$($dsmcmd <<EOF
+select NAME, TOTAL_SPACE, FREE_SPACE, SERVER from TSMGUI_ALLSTG_GRID where SERVER='$QUERY_SERVER'
+EOF
+)
+
+# Process all data lines
+echo "$output" | awk -F'\t' -v critical=$CRITICAL_THRESHOLD -v warning=$WARNING_THRESHOLD '
+NF >= 3 {  # Only process lines with enough columns
+    pool = $1
+    total = $2 + 0
+    free = $3 + 0
+    # Calculate used percentage
+    if (total > 0) {
+        used_pct = 100 - (free * 100 / total)
+    } else {
+        used_pct = 0
+    }
+    # Determine status
+    status = 0
+    if (used_pct >= critical) {
+        status = 2
+        msg = "CRIT"
+    } else if (used_pct >= warning) {
+        status = 1
+        msg = "WARN"
+    } else {
+        msg = "OK"
+    }
+
+    # Format output for Check_MK
+    printf "%d TSM_StoragePool_%s - %s - used_percentage=%.2f%%;%d;%d total=%.2f free=%.2f\n",
+        status, pool, msg, used_pct, warning, critical, total, free
+}
+' | sort -t_ -k3
